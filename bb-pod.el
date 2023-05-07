@@ -230,7 +230,7 @@
          (vars (plist-get (first namespaces) :vars))
          (load-var (lambda (x)
                      (let* ((name (plist-get x :name))
-                            (meta (parseedn-read-str (plist-get x :meta)))
+                            (meta (parseedn-read-str (or (plist-get x :meta) "{}")))
                             (docstring (gethash :doc meta))
                             (arglists (gethash :arglists meta))
                             (args-doc (if (= (length arglists) 1)

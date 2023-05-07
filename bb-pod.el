@@ -6,7 +6,7 @@
 ;; Maintainer: Amit Shrestha
 ;; URL: https://github.com/rorokimdim/bb-pod
 ;; Version: 0.0.1
-;; Package-Requires: ((emacs "26") (parseedn "20220520.835"))
+;; Package-Requires: ((emacs "26") (parseedn "20220520.835") (bencode "20190317.2010"))
 ;; Keywords: babashka
 
 ;; This program is free software: you can redistribute it and/or modify
@@ -63,6 +63,7 @@
   :link '(url-link :tag "GitHub" "https://github.com/rorokimdim/bb-pod")
   :link '(emacs-commentary-link :tag "Commentary" "bb-pod"))
 
+(require 'bencode)
 (require 'parseedn)
 
 (define-error 'bb-pod "bb-pod error")
@@ -120,7 +121,7 @@
          (proc (bb-pod--select-pod-process pod))
          (proc-buffer (process-buffer proc)))
     (when (process-live-p proc)
-      (process-send-string proc (bb-pod--bencode-encode (list :op "shutdown")))
+      (process-send-string proc (bencode-encode (list :op "shutdown")))
       (kill-process proc)
       (with-current-buffer (process-buffer proc)
         (let ((buffer-modified-p nil)
@@ -179,12 +180,12 @@
          (pod-process (bb-pod--select-pod-process pod))
          (timeout-seconds (or timeout-seconds 5)))
     (bb-pod--assoc-pod-state pod :message nil)
-    (process-send-string pod-process (bb-pod--bencode-encode request))
+    (process-send-string pod-process (bencode-encode request))
     (accept-process-output pod-process timeout-seconds)
     (let ((message (bb-pod--lookup-pod-state pod :message)))
       (when message
         (bb-pod--assoc-pod-state pod :message nil)
-        (let* ((decoded (bb-pod--bencode-decode message)))
+        (let* ((decoded (bencode-decode message)))
           (bb-pod--check-error decoded)
           decoded)))))
 
@@ -240,162 +241,6 @@
                             ,(format "%s\n args: %s" docstring args-doc)
                             (apply #'bb-pod--invoke pod ,name args)))))))
     (mapcar load-var vars)))
-
-;;
-;; bencode implementation -- not fast
-;;
-;; For a better, faster implementation checkout https://github.com/skeeto/emacs-bencode
-;;
-;; This code is similar but uses recursion to encode/decode so may not be suitable for
-;; parsing highly nested data.
-;;
-;; Also, this code does not worry about keeping the dictionary keys sorted.
-;;
-(defun bb-pod--plistp (x)
-  (and (consp x)
-       (keywordp (car x))))
-
-(defun bb-pod--bencode-encode-to-buffer (x)
-  (cond ((integerp x) (bb-pod--bencode-encode-int x))
-        ((stringp x) (bb-pod--bencode-encode-string x))
-        ((keywordp x) (bb-pod--bencode-encode-string
-                       (substring (symbol-name x) 1)))
-        ((bb-pod--plistp x) (bb-pod--bencode-encode-plist x))
-        ((hash-table-p x) (bb-pod--bencode-encode-hash-table x))
-        ((listp x) (bb-pod--bencode-encode-list x))
-        ((vectorp x) (bb-pod--bencode-encode-list
-                      (coerce x 'list)))
-        (t (signal 'bencode-unsupported-type x))))
-
-(defun bb-pod--bencode-encode (x)
-  (with-temp-buffer
-    (set-buffer-multibyte nil)
-    (bb-pod--bencode-encode-to-buffer x)
-    (buffer-string)))
-
-(defun bb-pod--bencode-encode-int (x)
-  (insert "i" (number-to-string x) "e"))
-
-(defun bb-pod--bencode-encode-string (x)
-  (insert (number-to-string (length x)) ":" x))
-
-(defun bb-pod--map-plist (fn xs)
-  (cl-loop for (k v) on xs by 'cddr
-           collect (funcall fn k v)))
-
-(defun bb-pod--bencode-encode-plist (xs)
-  (unless (evenp (length xs))
-    (signal 'bencode-invalid-plist-entries xs))
-  (insert "d")
-  (bb-pod--map-plist (lambda (k v)
-                       (bb-pod--bencode-encode-to-buffer k)
-                       (bb-pod--bencode-encode-to-buffer v))
-                     xs)
-  (insert "e"))
-
-(defun bb-pod--bencode-encode-hash-table (ht)
-  (insert "d")
-  (maphash (lambda (k v)
-             (bb-pod--bencode-encode-to-buffer k)
-             (bb-pod--bencode-encode-to-buffer v))
-           ht)
-  (insert "e"))
-
-(defun bb-pod--bencode-encode-list (xs)
-  (insert "l")
-  (dolist (x xs)
-    (bb-pod--bencode-encode-to-buffer x))
-  (insert "e"))
-
-(defun bb-pod--digitp (x)
-  (and x (>= x ?0 ) (<= x ?9)))
-
-(defun bb-pod--char-to-string (x)
-  (and x (char-to-string x)))
-
-(defun bb-pod--bencode-decode-int ()
-  (unless (= (char-after) ?i)
-    (signal 'bencode-invalid-integer-encoding (bb-pod--char-to-string (char-after))))
-
-  (forward-char)
-  (let ((int-value 0)
-        (sign 1)
-        (c (char-after)))
-    (cond ((= c ?+) (forward-char))
-          ((= c ?-) (progn (setf sign -1)
-                           (forward-char))))
-    (setf c (char-after))
-    (while (bb-pod--digitp c)
-      (setf int-value (+ (* int-value 10)
-                         c
-                         (- ?0)))
-      (forward-char)
-      (setf c (char-after)))
-    (unless (and c (= c ?e))
-      (signal 'bencode-invalid-integer-encoding (bb-pod--char-to-string c)))
-    (forward-char)
-    (* sign int-value)))
-
-(defun bb-pod--bencode-decode-string ()
-  (let ((n 0)
-        (c (char-after)))
-    (while (bb-pod--digitp c)
-      (setf n (+ (* n 10)
-                 c
-                 (- ?0)))
-      (forward-char)
-      (setf c (char-after)))
-    (unless (and c (= c ?:))
-      (signal 'bencode-invalid-integer-encoding (bb-pod--char-to-string c)))
-    (forward-char)
-    (cond
-     ((= n 0) "")
-     ((> (+ (point) n) (point-max)) (signal 'bencode-invalid-string-encoding 'end-of-file))
-     (t (prog1 (buffer-substring (point) (+ (point) n))
-          (forward-char n))))))
-
-(defun bb-pod--bencode-decode-list ()
-  (unless (= (char-after) ?l)
-    (signal 'bencode-invalid-list-encoding (bb-pod--char-to-string (char-after))))
-
-  (forward-char)
-  (let ((c (char-after))
-        (xs ()))
-    (while (not (= c ?e))
-      (push (bb-pod--bencode-decode-buffer) xs)
-      (setf c (char-after)))
-    (forward-char)
-    (nreverse xs)))
-
-(defun bb-pod--bencode-decode-dict ()
-  (unless (= (char-after) ?d)
-    (signal 'bencode-invalid-list-encoding (bb-pod--char-to-string (char-after))))
-
-  (forward-char)
-  (let ((c (char-after))
-        (xs ()))
-    (while (not (= c ?e))
-      (let ((k (bb-pod--bencode-decode-buffer))
-            (v (bb-pod--bencode-decode-buffer)))
-        (push (intern (concat ":" k)) xs)
-        (push v xs))
-      (setf c (char-after)))
-    (forward-char)
-    (nreverse xs)))
-
-(defun bb-pod--bencode-decode-buffer ()
-  (let ((start (char-after)))
-    (cond ((= start ?i) (bb-pod--bencode-decode-int))
-          ((= start ?d) (bb-pod--bencode-decode-dict))
-          ((= start ?l) (bb-pod--bencode-decode-list))
-          ((bb-pod--digitp start) (bb-pod--bencode-decode-string))
-          (t (signal 'bencode-invalid-encoding (bb-pod--char-to-string start))))))
-
-(defun bb-pod--bencode-decode (x)
-  (with-temp-buffer
-    (insert x)
-    (goto-char (point-min))
-    (bb-pod--bencode-decode-buffer)))
 
 (provide 'bb-pod)
 
